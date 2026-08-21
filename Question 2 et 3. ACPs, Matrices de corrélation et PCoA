@@ -1,6 +1,13 @@
+## ============================================================================
+## SCRIPT B -  questions 2 et 3
+## Entree : "Donnees Memoire Charles Vanderoost.xlsx", feuille "Version R"
+## Sorties : ACP des traits, matrices de correlation, PCoA, PERMANOVA,
+##           stades successionnels.
+## ============================================================================
+
 rm(list = ls())
 
-setwd("C:/Users/charl/Desktop/Etudes/Master 2/Mémoire/Statistiques")
+setwd("C:/Users/charl/Desktop/Etudes/Master 2/Mémoire/Statistiques") #Ou autre emplacement du fichier
 
 pkgs <- c("readxl", "dplyr", "vegan", "forecast", "pracma", "paran", "corrplot", "Hmisc", "plotrix")
 to_install <- pkgs[!pkgs %in% rownames(installed.packages())]
@@ -20,7 +27,9 @@ R.version.string
 ########################################
 
 ## --- Etiquettes pour les graphiques ------------------------------------
-##  Uniquement les six acronymes les plus établis dans la littérature
+
+
+## Les six acronymes les plus établis dans la littérature
 
 ETIQUETTES <- c(
   ## --- Foliaires ---
@@ -187,7 +196,10 @@ IND <- X %>%
 ## mean(NA, na.rm = TRUE) renvoie NaN : on remet des NA propres
 IND[] <- lapply(IND, function(cc) { if (is.numeric(cc)) cc[is.nan(cc)] <- NA; cc })
 
-dim(IND)                       # 61 individus
+
+##Nombres initiaux, 3 individus seront écartés dans les analyses 
+#par absence de données (pH), portant le nombre à 58
+dim(IND)                       # 61 individus  
 length(unique(IND$Espece))     # 29 especes
 length(unique(IND$Genre))      # 22 genres
 length(unique(IND$Famille))    # 15 familles
@@ -196,7 +208,7 @@ table(IND$Statut)              # 38 indigenes / 23 exotiques
 
 ## A6. EXPORT
 ## ==========
-## Format compatible avec le code GLMM du promoteur :
+## Format compatible avec le code GLMM JV :
 ##   read.table("Traits.csv", header = TRUE, sep = ";", dec = ",")
 
 write.table(IND, "Traits.csv", sep = ";", dec = ",",
@@ -256,6 +268,10 @@ traits <- traits[complete.cases(traits), ]     # 56 individus
 
 ## B3. Normalisation et standardisation des traits:
 ## ================================================
+## Bloc exploratoire : verification visuelle de l'effet de la transformation
+## Box-Cox sur quatre traits representatifs. Les objets produits ici ne servent
+## pas aux analyses ; la fonction preparer() industrialise la
+## sequence et c'est elle qui alimente toute la suite du script.
 
 head(traits) ; dim(traits)
 
@@ -311,7 +327,7 @@ preparer <- function(tab, vars) {
 }
 
 
-## B4. ACP, flèches rouges et vertes
+## B4. ACP, flèches oranges et bleues
 ## =================================
 
 acp_biplot <- function(M, vars_fol, vars_rac, titre, fichier,
@@ -423,62 +439,10 @@ for (nom in grep("_brut$", names(RESUME), value = TRUE)) {
 
 par(mfrow = c(1, 1))
 
-## ============================================================================
-## B5bis. Q1 par statut : ACP du jeu selectionne (2 echelles x 2 rotations),
-##        separement pour les especes indigenes puis exotiques.
-## ============================================================================
-
-ESP$Statut <- IND$Statut[match(ESP$SP_code, IND$SP_code)]   # statut au niveau espece
-
-vars <- c(fol_select, rac_select)
-
-RESUME_STATUT <- list()
-for (st in c("Indigene", "Exotique")) {
-  
-  ECH_st <- list(individu = IND[IND$Statut == st, ],
-                 espece   = ESP[ESP$Statut == st, ])
-  
-  for (ech in names(ECH_st)) {
-    
-    M <- preparer(ECH_st[[ech]], vars)
-    
-    cat("\n=====", st, "|", ech, "=====  n =", nrow(M), " traits =", ncol(M), "\n")
-    if (nrow(M) > ncol(M)) {
-      cat("axes (Horn) :",
-          paran(M, iterations = 1000, quietly = TRUE, status = FALSE)$Retained, "\n")
-    } else {
-      cat("/!\\ n <= nombre de traits : lecture qualitative seulement\n")
-    }
-    
-    for (rot in c(FALSE, TRUE)) {
-      nom <- paste0("ACP_", st, "_", ech, if (rot) "_varimax" else "_brut")
-      RESUME_STATUT[[nom]] <- acp_biplot(
-        M, fol_select, rac_select,
-        titre       = paste(st, ech, if (rot) "varimax" else "brut", sep = " - "),
-        fichier     = NA,
-        varimax_rot = rot)
-    }
-  }
-}
-
-length(RESUME_STATUT)   # 8 figures
-
-## Pourcentage de variation explique par chaque composante (versions sans rotation)
-par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
-for (nom in grep("_brut$", names(RESUME_STATUT), value = TRUE)) {
-  eigs <- RESUME_STATUT[[nom]]$eigs
-  barplot(eigs, names.arg = paste0("PC", seq_along(eigs)),
-          col = c(rep("black", 2), rep("grey", length(eigs) - 2)),
-          ylab = "% de variance expliquee",
-          main = gsub("^ACP_|_brut$", "", nom))
-}
-par(mfrow = c(1, 1))
 
 
 ## ============================================================================
-## B5ter. Biplot combine : traits (foliaires vert / racinaires rouge)
-##        + especes (indigenes jaune / exotiques bleu).
-##        Echelle espece, jeu selectionne, avec et sans varimax.
+## B5bis. Biplot combine : Vecteurs de traits en couleurs distinctes, et espèces placées
 ## ============================================================================
 
 ESP$Statut <- IND$Statut[match(ESP$SP_code, IND$SP_code)]
@@ -508,9 +472,7 @@ col.stat <- c(Indigene = COL_IND, Exotique = COL_EXO)
 for (plan in list(c(1, 2), c(3, 4))) {
   
   a <- plan[1]; b <- plan[2]
-  load0 <- vegan::scores(pca, choices = c(a, b))$species
-  site0 <- vegan::scores(pca, choices = c(a, b))$sites
-  
+
 load0 <- vegan::scores(pca, choices = c(a, b))$species
 #Corrélations entre traits et composantes principales
 site0 <- vegan::scores(pca, choices = c(a, b))$sites          # especes (points)
@@ -545,12 +507,6 @@ for (rot in c(FALSE, TRUE)) {
   abline(h = 0, v = 0, lty = 2, col = "grey60")
   ordiellipse(sco[, 1:2], grp, col = col.stat[levels(grp)], lwd = 2) #ellipses a 1 ecart-type
   # ordiellipse(sco[, 1:2], grp, kind = "sd", conf = 0.95, col = col.stat[levels(grp)], lwd = 2) #ellipses a 95%
-  
-  #Paragraphe similaire à celui en dessous, mais n'empêchant pas le chevauchement des étiquettes
-  # arrows(0, 0, Ar[fol, 1], Ar[fol, 2], length = 0.08, col = COL_FOL, lwd = 1.6)
-  # text(Ar[fol, 1], Ar[fol, 2], etiqueter(fol), col = "forestgreen", pos = 3, cex = 0.8, font = 2)
-  # arrows(0, 0, Ar[rac, 1], Ar[rac, 2], length = 0.08, col = COL_RAC, lwd = 1.6)
-  # text(Ar[rac, 1], Ar[rac, 2], etiqueter(rac), col = "firebrick", pos = 3, cex = 0.8, font = 2)
   
   ## --- fleches ---
   arrows(0, 0, Ar[fol, 1], Ar[fol, 2], length = 0.08, col = COL_FOL, lwd = 1.6)
@@ -875,5 +831,4 @@ ordiellipse(sit, grp, col = col.grp[levels(grp)], lwd = 2)
 legend("topright",    legend = levels(succ),   pch = pch.succ, bty = "n", cex = 0.8)
 legend("bottomright", legend = names(col.grp), pch = 21,
        pt.bg = col.grp, bty = "n", cex = 0.8)
-
 
