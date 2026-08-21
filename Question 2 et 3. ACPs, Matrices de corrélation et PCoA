@@ -1,1 +1,879 @@
+rm(list = ls())
+
+setwd("C:/Users/charl/Desktop/Etudes/Master 2/Mémoire/Statistiques")
+
+pkgs <- c("readxl", "dplyr", "vegan", "forecast", "pracma", "paran", "corrplot", "Hmisc", "plotrix")
+to_install <- pkgs[!pkgs %in% rownames(installed.packages())]
+if (length(to_install)) install.packages(to_install, dependencies = TRUE)
+invisible(lapply(pkgs, library, character.only = TRUE))
+## --- Palette daltonisme (Okabe-Ito) ---
+COL_FOL <- "#E69F00"  # traits foliaires  (orange)
+COL_RAC <- "#0072B2"  # traits racinaires (bleu)
+COL_IND <- "#009E73"  # indigènes         (vert-bleu)
+COL_EXO <- "#CC79A7"  # exotiques         (violet-rose)
+PALETTE_COR <- colorRampPalette(c("#0072B2", "white", "#E69F00"))(200)  # bleu–blanc–orange
+
+R.version.string
+
+
+##  PARTIE A - PREPARATION DES DONNEES
+########################################
+
+## --- Etiquettes pour les graphiques ------------------------------------
+##  Uniquement les six acronymes les plus établis dans la littérature
+
+ETIQUETTES <- c(
+  ## --- Foliaires ---
+  "F_SS"  = "SLA",     # Specific Leaf Area
+  "F_TMS" = "LDMC",    # Leaf Dry Matter Content
+  "F_S"   = "LA",      # Leaf Area
+  
+  ## --- Racinaires ---
+  "R_LS"  = "SRL",     # Specific Root Length
+  "R_DT"  = "RTD",     # Root Tissue Density
+  "R_D"   = "RD",      # Root Diameter
+  
+  ## --- Concentrations foliaires : prefixe L (Leaf) ---
+  "F_Al"  = "L_Al", "F_B"  = "L_B",  "F_Ba" = "L_Ba", "F_Cd" = "L_Cd",
+  "F_Cu"  = "L_Cu", "F_Fe" = "L_Fe", "F_K"  = "L_K",  "F_Li" = "L_Li",
+  "F_Mg"  = "L_Mg", "F_Mn" = "L_Mn", "F_Ni" = "L_Ni", "F_P"  = "L_P",
+  "F_Pb"  = "L_Pb", "F_Zn" = "L_Zn"
+)
+## Les concentrations racinaires (R_K, R_Mg...) gardent leur nom car déja lisibles.
+
+## --- Fonction de traduction --------------------------------------------
+##  Pour le sol : on retire le prefixe "S_".
+##  L'absence de prefixe devient le marqueur d'une variable edaphique.
+##      S_pH -> pH     S_Al -> Al     S_Mg -> Mg
+
+etiqueter <- function(v) {
+  out <- unname(ETIQUETTES[v])
+  manquants <- is.na(out)
+  out[manquants] <- sub("^S_", "", v[manquants])
+  out
+}
+
+## Verification rapide
+etiqueter(c("F_SS","R_LS","R_DT","R_D","F_TMS","F_K","R_K","S_K","S_pH"))
+## attendu : "SLA" "SRL" "RTD" "RD" "LDMC" "L_K" "R_K" "K" "pH"
+
+
+## =============================================================================
+## A2. IMPORT
+## =============================================================================
+
+chemin <- "../Tableaux/Données Mémoire Charles Vanderoost.xlsx"
+stopifnot(file.exists(chemin)) 
+
+X <- as.data.frame(read_excel(chemin, sheet = "Version R"))
+dim(X)                             # attendu : 519 lignes x 70 colonnes
+
+## --- A2a. Nettoyage des colonnes parasites --
+## Des colonnes vides a droite du tableau
+
+X <- X[, !grepl("^\\.\\.\\.", names(X))]
+X <- X[, colSums(!is.na(X)) > 0]
+
+dim(X)
+
+## --- A2b. Colonnes lues en texte -> numerique -------------------------------
+## I_Ci, I_D et F_MF contiennent des cellules stockees en texte dans Excel.
+
+for (v in c("I_Ci", "I_D", "F_MF")) {
+  brut <- as.character(X[[v]])
+  test <- suppressWarnings(as.numeric(gsub(",", ".", brut)))
+  pb   <- unique(brut[is.na(test) & !is.na(brut)])
+  cat(v, "-> valeurs non numeriques :",
+      if (length(pb)) paste(pb, collapse = " | ") else "aucune", "\n")
+}
+
+for (v in c("I_Ci", "I_D", "F_MF")) {
+  txt    <- gsub("[[:space:]]", "", as.character(X[[v]]))
+  txt[txt %in% c("MST", "NA", "")] <- NA
+  X[[v]] <- as.numeric(gsub(",", ".", txt))
+}
+
+sum(is.na(X$F_MF))                   # attendu : 0
+unique(X$I_Co[is.na(X$I_Ci)])        # attendu : Cor Ave 2, Sam Nig 2
+
+
+## A3. CORRECTION DES VALEURS ABERRANTES (feuilles cassées au séchage)
+## ===================================================================
+
+X$F_TMS[X$F_TMS == 0] <- NA
+X$F_SS[X$F_SS   == 0] <- NA
+
+sum(X$F_TMS == 0, na.rm = TRUE)      # attendu : 0
+
+
+## A4. TAXONOMIE ET STATUT INDIGENE / EXOTIQUE
+## ===========================================
+##
+##code espece est extrait de I_Co : "Ace Pla 2 (1)" -> "Ace Pla"
+
+X$SP_code <- trimws(gsub("\\s*\\d.*$", "", X$I_Co))
+sort(unique(X$SP_code))              # doit donner 29 codes
+
+TAXONOMIE <- data.frame(
+  SP_code = c("Ace Pse","Fra Exc","Ace Pla","Cor San","Cra Mon","Sal Alb",
+              "Sal Cap","Cor Ave","Car Bet","Ile Aqu","Fag Syl","Mal Syl",
+              "Que Rob","Que Pet","Bet Pen","Sam Nig","Pru Avi",
+              "Sym Alb","Pru Ser","Rob Pse","Til sp","Que Rub","Rib Rub",
+              "Pru Cer","Ulm Min","Lig Ova","Pru Lau","Mah Aqu","Cas Sat"),
+  Code    = c("ACE PSE","FRA EXC","ACE PLA","COR SAN","CRA MON","SAL ALB",
+              "SAL CAP","COR AVE","CAR BET","ILE AQU","FAG SYL","MAL SYL",
+              "QUE ROB","QUE PET","BET PEN","SAM NIG","PRU AVI",
+              "SYM ALB","PRU SER","ROB PSE","TIL COR","QUE RUB","RIB RUB",
+              "PRU CER","ULM MIN","LIG OVA","PRU LAU","MAH AQU","CAS SAT"),
+  Espece  = c("Acer pseudoplatanus","Fraxinus excelsior","Acer platanoides",
+              "Cornus sanguinea","Crataegus monogyna","Salix alba",
+              "Salix caprea","Corylus avellana","Carpinus betulus",
+              "Ilex aquifolium","Fagus sylvatica","Malus sylvestris",
+              "Quercus robur","Quercus petraea","Betula pendula",
+              "Sambucus nigra","Prunus avium",
+              "Symphoricarpos albus","Prunus serotina","Robinia pseudoacacia",
+              "Tilia cordata","Quercus rubra","Ribes rubrum",
+              "Prunus cerasifera","Ulmus minor","Ligustrum ovalifolium",
+              "Prunus laurocerasus","Mahonia aquifolium","Castanea sativa"),
+  Genre   = c("Acer","Fraxinus","Acer","Cornus","Crataegus","Salix",
+              "Salix","Corylus","Carpinus","Ilex","Fagus","Malus",
+              "Quercus","Quercus","Betula","Sambucus","Prunus",
+              "Symphoricarpos","Prunus","Robinia","Tilia","Quercus","Ribes",
+              "Prunus","Ulmus","Ligustrum","Prunus","Mahonia","Castanea"),
+  Famille = c("Sapindaceae","Oleaceae","Sapindaceae","Cornaceae","Rosaceae",
+              "Salicaceae","Salicaceae","Betulaceae","Betulaceae",
+              "Aquifoliaceae","Fagaceae","Rosaceae","Fagaceae","Fagaceae",
+              "Betulaceae","Adoxaceae","Rosaceae",
+              "Caprifoliaceae","Rosaceae","Fabaceae","Malvaceae","Fagaceae",
+              "Grossulariaceae","Rosaceae","Ulmaceae","Oleaceae","Rosaceae",
+              "Berberidaceae","Fagaceae"),
+  Statut  = c(rep("Indigene", 17), rep("Exotique", 12)),
+  stringsAsFactors = FALSE
+)
+
+## Aucun code ne doit rester orphelin
+stopifnot(length(setdiff(unique(X$SP_code), TAXONOMIE$SP_code)) == 0)
+
+X <- merge(X, TAXONOMIE, by = "SP_code", all.x = TRUE)
+
+
+## A5. AGREGATION AU NIVEAU INDIVIDU (1 ligne = 1 arbre)
+## =====================================================
+
+## Chaque arbre a entre 3 et 19 feuilles mesurees (mediane 8).
+## On moyenne les traits foliaires ; tout le reste (racines, sol, morphologie)
+## est deja constant par arbre -> on prend la premiere valeur.
+
+cols_feuille <- c("F_MF", "F_MS", "F_TMS", "F_S", "F_SS")
+cols_num     <- names(X)[sapply(X, is.numeric)]
+autres_cols  <- setdiff(cols_num, c(cols_feuille, "F_N", "I_N"))
+
+IND <- X %>%
+  group_by(I_N, SP_code) %>%
+  summarise(
+    I_Co       = first(I_Co),
+    Code       = first(Code),
+    Espece     = first(Espece),
+    Genre      = first(Genre),
+    Famille    = first(Famille),
+    Statut     = first(Statut),
+    N_feuilles = n(),
+    across(all_of(cols_feuille), ~ mean(.x, na.rm = TRUE)),
+    across(all_of(autres_cols),  ~ first(.x)),
+    .groups = "drop"
+  ) %>%
+  as.data.frame()
+
+## mean(NA, na.rm = TRUE) renvoie NaN : on remet des NA propres
+IND[] <- lapply(IND, function(cc) { if (is.numeric(cc)) cc[is.nan(cc)] <- NA; cc })
+
+dim(IND)                       # 61 individus
+length(unique(IND$Espece))     # 29 especes
+length(unique(IND$Genre))      # 22 genres
+length(unique(IND$Famille))    # 15 familles
+table(IND$Statut)              # 38 indigenes / 23 exotiques
+
+
+## A6. EXPORT
+## ==========
+## Format compatible avec le code GLMM du promoteur :
+##   read.table("Traits.csv", header = TRUE, sep = ";", dec = ",")
+
+write.table(IND, "Traits.csv", sep = ";", dec = ",",
+            row.names = FALSE, na = "NA")
+
+cat("\nTraits.csv ecrit :", nrow(IND), "individus x", ncol(IND), "colonnes\n")
+
+
+## PARTIE B - ACP DES TRAITS
+############################
+
+
+## B1. NIVEAU INDIVIDU ET NIVEAU ESPECE
+## ====================================
+
+IND <- read.table("Traits.csv", header = TRUE, sep = ";", dec = ",",
+                  stringsAsFactors = FALSE)
+
+ESP <- IND %>%
+  group_by(SP_code) %>%
+  summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  as.data.frame()
+
+cat("individus :", nrow(IND), "| especes :", nrow(ESP), "\n")
+
+
+## B2. JEUX DE TRAITS
+## ==================
+
+# ## --- Jeu complet ---
+# fol_complet <- c("F_TMS","F_SS","F_S",
+#                  "F_Al","F_B","F_Ba","F_Cd","F_Cu","F_Fe","F_K","F_Li",
+#                  "F_Mg","F_Mn","F_Ni","F_P","F_Pb","F_Zn")
+# rac_complet <- c("R_LS","R_DT","R_D",
+#                  "R_Al","R_B","R_Ba","R_Ca","R_Cd","R_Cu","R_Fe","R_K","R_Li",
+#                  "R_Mg","R_Mn","R_Ni","R_P","R_Pb","R_Zn")
+
+fol_complet <- c("F_TMS","F_SS","F_S",
+                 "F_Al","F_Fe","F_K","F_Mg","F_Mn","F_P","F_Zn")
+rac_complet <- c("R_LS","R_DT","R_D",
+                 "R_Al","R_Fe","R_K","R_Mg","R_Mn","R_P","R_Zn")
+
+## --- Jeu avec les traits sélectionnés ---
+fol_select <- c("F_TMS","F_SS","F_K","F_Mg","F_P")
+rac_select <- c("R_LS","R_DT","R_D","R_Mg","R_K","R_P")
+
+JEUX <- list(
+  complet   = list(fol = fol_complet, rac = rac_complet),
+  selection = list(fol = fol_select,  rac = rac_select)
+)
+
+ECHELLES <- list(individu = IND, espece = ESP)
+
+traits <- IND[, c(fol_select, rac_select)]
+traits <- traits[complete.cases(traits), ]     # 56 individus
+
+
+## B3. Normalisation et standardisation des traits:
+## ================================================
+
+head(traits) ; dim(traits)
+
+## Distribution originale des donnees, 4 variables:
+par(mfrow = c(1, 4), mex = 0.3)
+plot(density(traits$F_SS), main = "SLA - brut")
+plot(density(traits$F_P),  main = "L_P - brut")
+plot(density(traits$R_LS), main = "SRL - brut")
+plot(density(traits$R_P),  main = "R_P - brut")
+traits_2 = traits
+
+## Normalisation BoxCox :
+for(i in 1:ncol(traits_2)){
+  lambda1 <- BoxCox.lambda(traits_2[,i] + abs(min(traits_2[,i])) + 0.0000000001,
+                           method = "loglik", lower = -3, upper = 3)
+  traits_2[,i] <- BoxCox(traits_2[,i], lambda = lambda1)
+}
+
+## Distribution des donnees apres normalisation:
+par(mfrow = c(1, 4), mex = 0.3)
+for(j in 1:4){
+  if(j==1){plot(density(traits_2$F_SS), main = "SLA - BoxCox")}
+  if(j==2){plot(density(traits_2$F_P),  main = "L_P - BoxCox")}
+  if(j==3){plot(density(traits_2$R_LS), main = "SRL - BoxCox")}
+  if(j==4){plot(density(traits_2$R_P),  main = "R_P - BoxCox")}
+}
+par(mfrow = c(1,1))
+
+
+## Standardisation des donnees (moyenne = 0 et ecart-type = 1 pour chaque variable):
+## Obligatoire quand on compare des variables differentes !!
+#-----------------------------------------------------------------------------------
+library(vegan)
+traits = decostand(traits_2, "standardize") ; head(traits) ; dim(traits)
+
+colMeans(traits)   ## verification que chaque variable a une moyenne 0
+sd(traits$F_SS)    ## verification que l'ecart-type du SLA = 1
+sd(traits$F_P)     ## verification que l'ecart-type du L_P = 1
+sd(traits$R_LS)    ## verification que l'ecart-type du SRL = 1
+sd(traits$R_P)     ## verification que l'ecart-type du R_P = 1
+
+## Pareil que ci-dessus mais pour B5.
+preparer <- function(tab, vars) {
+  stopifnot(all(vars %in% names(tab)))
+  M <- tab[, vars, drop = FALSE]
+  M <- M[complete.cases(M), , drop = FALSE]
+  for (i in seq_len(ncol(M))) {
+    lam <- BoxCox.lambda(M[, i] + abs(min(M[, i])) + 1e-10,
+                         method = "loglik", lower = -3, upper = 3)
+    M[, i] <- BoxCox(M[, i], lambda = lam)
+  }
+  as.data.frame(decostand(M, "standardize"))
+}
+
+
+## B4. ACP, flèches rouges et vertes
+## =================================
+
+acp_biplot <- function(M, vars_fol, vars_rac, titre, fichier,
+                       varimax_rot = TRUE, a = 1, b = 2) {
+  
+  pca  <- rda(M)
+  eigs <- pca$CA$eig / sum(pca$CA$eig) * 100
+  load <- vegan::scores(pca, choices = c(a, b))$species
+  
+  if (varimax_rot) {
+    rload <- unclass(varimax(load)$loadings)   # unclass : redevient une matrice
+    ## Apres rotation, la variance est redistribuee entre les 2 axes retenus :
+    ## les valeurs propres d'origine ne s'appliquent plus telles quelles.
+    part_rel <- colSums(rload^2) / sum(colSums(rload^2))   # part relative dans le plan
+    part     <- part_rel * sum(eigs[c(a, b)])              # rapportee au total du plan
+    stopifnot(abs(sum(part) - sum(eigs[c(a, b)])) < 1e-8)
+    lab  <- c(paste0("PC", a, " varimax (", round(part[1], 1), "%)"),
+              paste0("PC", b, " varimax (", round(part[2], 1), "%)"))
+  } else {
+    rload <- load
+    lab   <- c(paste0("PC", a, " (", round(eigs[a], 1), "%)"),
+               paste0("PC", b, " (", round(eigs[b], 1), "%)"))
+  }
+  
+  fol     <- intersect(vars_fol, rownames(rload))
+  rac     <- intersect(vars_rac, rownames(rload))
+  lim     <- max(abs(rload[, 1:2])) * 1.25
+  cex_lab <- if (nrow(rload) > 15) 0.60 else 0.85
+  
+  dessiner <- function() {
+    par(mar = c(4.5, 4.5, 3.5, 1))
+    plot(NA, xlim = c(-lim, lim), ylim = c(-lim, lim), asp = 1,
+         xlab = lab[1], ylab = lab[2], main = titre,
+         cex.lab = 1.1, cex.main = 1.05)
+    abline(h = 0, v = 0, lty = 2, col = "grey60")
+    
+    ## Etiquettes traduites au moment de dessiner : les noms internes
+    ## des colonnes ne changent jamais.
+    arrows(0, 0, rload[fol, 1], rload[fol, 2], length = 0.08, col = COL_FOL, lwd = 1.6)
+    text(rload[fol, 1], rload[fol, 2], labels = etiqueter(fol), col = COL_FOL, pos = 3, cex = cex_lab, font = 2)
+    
+    arrows(0, 0, rload[rac, 1], rload[rac, 2], length = 0.08, col = COL_RAC, lwd = 1.6)
+    text(rload[rac, 1], rload[rac, 2], labels = etiqueter(rac), col = COL_RAC, pos = 3, cex = cex_lab, font = 2)
+    
+    legend("topright", legend = c("Traits foliaires", "Traits racinaires"),
+           col = c(COL_FOL, COL_RAC), lty = 1, lwd = 2, bty = "n", cex = 0.9)
+    mtext(paste0("n = ", nrow(M), " | ", ncol(M), " traits"),
+          side = 1, line = 3.2, adj = 1, cex = 0.75, col = "grey40")
+  }
+  
+  dessiner()
+  invisible(list(pca = pca, loadings = rload, eigs = eigs))
+}
+
+
+## B5. BOUCLE : 2 echelles x 2 jeux x 2 rotations = 8 figures
+## ==========================================================
+
+FAIRE_PARAN <- TRUE     #nb d'axes significatifs
+RESUME <- list()
+
+for (ech in names(ECHELLES)) {
+  for (jeu in names(JEUX)) {
+    
+    vars <- c(JEUX[[jeu]]$fol, JEUX[[jeu]]$rac)
+    M    <- preparer(ECHELLES[[ech]], vars)
+    
+    cat("\n=====", toupper(ech), "|", jeu, "=====\n")
+    cat("n =", nrow(M), " traits =", ncol(M), "\n")
+    
+    if (FAIRE_PARAN && nrow(M) > ncol(M)) {
+      np <- paran(M, iterations = 1000, quietly = TRUE, status = FALSE)
+      cat("axes significatifs (Horn) :", np$Retained, "\n")
+    } else if (FAIRE_PARAN) {
+      cat("/!\\ paran ignore : moins d'observations que de traits.\n",
+          "    L'ACP reste calculable mais est degeneree - a ne pas\n",
+          "    presenter comme un resultat quantitatif.\n")
+    }
+    
+    for (rot in c(FALSE, TRUE)) {
+      nom   <- paste0("ACP_", ech, "_", jeu, if (rot) "_varimax" else "_brut")
+      titre <- paste0("ACP - echelle ", ech, " - jeu ", jeu,
+                      if (rot) " - rotation varimax" else " - sans rotation")
+      
+      RESUME[[nom]] <- acp_biplot(
+        M, JEUX[[jeu]]$fol, JEUX[[jeu]]$rac,
+        titre       = titre,
+        varimax_rot = rot
+      )
+    }
+  }
+}
+
+cat("\n", length(RESUME), "figures produites")
+
+
+## % de variation expliquée par les dimensions, avant rotation
+## ===============================
+
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+
+for (nom in grep("_brut$", names(RESUME), value = TRUE)) {
+  e <- RESUME[[nom]]$eigs
+  barplot(e, names.arg = paste0("PC", seq_along(e)),
+          col  = c(rep("black", 2), rep("grey70", length(e) - 2)),
+          ylab = "% de variance expliquee",
+          main = gsub("^ACP_|_brut$", "", nom))
+}
+
+par(mfrow = c(1, 1))
+
+## ============================================================================
+## B5bis. Q1 par statut : ACP du jeu selectionne (2 echelles x 2 rotations),
+##        separement pour les especes indigenes puis exotiques.
+## ============================================================================
+
+ESP$Statut <- IND$Statut[match(ESP$SP_code, IND$SP_code)]   # statut au niveau espece
+
+vars <- c(fol_select, rac_select)
+
+RESUME_STATUT <- list()
+for (st in c("Indigene", "Exotique")) {
+  
+  ECH_st <- list(individu = IND[IND$Statut == st, ],
+                 espece   = ESP[ESP$Statut == st, ])
+  
+  for (ech in names(ECH_st)) {
+    
+    M <- preparer(ECH_st[[ech]], vars)
+    
+    cat("\n=====", st, "|", ech, "=====  n =", nrow(M), " traits =", ncol(M), "\n")
+    if (nrow(M) > ncol(M)) {
+      cat("axes (Horn) :",
+          paran(M, iterations = 1000, quietly = TRUE, status = FALSE)$Retained, "\n")
+    } else {
+      cat("/!\\ n <= nombre de traits : lecture qualitative seulement\n")
+    }
+    
+    for (rot in c(FALSE, TRUE)) {
+      nom <- paste0("ACP_", st, "_", ech, if (rot) "_varimax" else "_brut")
+      RESUME_STATUT[[nom]] <- acp_biplot(
+        M, fol_select, rac_select,
+        titre       = paste(st, ech, if (rot) "varimax" else "brut", sep = " - "),
+        fichier     = NA,
+        varimax_rot = rot)
+    }
+  }
+}
+
+length(RESUME_STATUT)   # 8 figures
+
+## Pourcentage de variation explique par chaque composante (versions sans rotation)
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+for (nom in grep("_brut$", names(RESUME_STATUT), value = TRUE)) {
+  eigs <- RESUME_STATUT[[nom]]$eigs
+  barplot(eigs, names.arg = paste0("PC", seq_along(eigs)),
+          col = c(rep("black", 2), rep("grey", length(eigs) - 2)),
+          ylab = "% de variance expliquee",
+          main = gsub("^ACP_|_brut$", "", nom))
+}
+par(mfrow = c(1, 1))
+
+
+## ============================================================================
+## B5ter. Biplot combine : traits (foliaires vert / racinaires rouge)
+##        + especes (indigenes jaune / exotiques bleu).
+##        Echelle espece, jeu selectionne, avec et sans varimax.
+## ============================================================================
+
+ESP$Statut <- IND$Statut[match(ESP$SP_code, IND$SP_code)]
+vars <- c(fol_select, rac_select)
+keep <- complete.cases(ESP[, vars])
+Yb   <- preparer(ESP, vars)                    # traits transformes + standardises
+grp  <- factor(ESP$Statut[keep])
+
+pca  <- rda(Yb)
+eigs <- pca$CA$eig / sum(pca$CA$eig) * 100
+
+## --- Correlations traits x 4 premieres composantes (annexe) ---
+sit4 <- vegan::scores(pca, choices = 1:4)$sites
+tab4 <- round(cor(Yb, sit4), 3)
+rownames(tab4) <- etiqueter(rownames(tab4))
+colnames(tab4) <- paste0("PC", 1:4)
+cat("\n=== Correlations traits x PC1-PC4 (sans rotation) ===\n"); print(tab4)
+
+## --- % de variance par composante -------------------------------------------
+barplot(eigs, names.arg = paste0("PC", seq_along(eigs)),
+        col = c(rep("black", 2), rep("grey", length(eigs) - 2)),
+        ylab = "% de variance expliquee", main = "Valeurs propres")
+round(eigs, 1)
+
+## --- Biplots (sans puis avec rotation) --------------------------------------
+col.stat <- c(Indigene = COL_IND, Exotique = COL_EXO)
+for (plan in list(c(1, 2), c(3, 4))) {
+  
+  a <- plan[1]; b <- plan[2]
+  load0 <- vegan::scores(pca, choices = c(a, b))$species
+  site0 <- vegan::scores(pca, choices = c(a, b))$sites
+  
+load0 <- vegan::scores(pca, choices = c(a, b))$species
+#Corrélations entre traits et composantes principales
+site0 <- vegan::scores(pca, choices = c(a, b))$sites          # especes (points)
+## --- AVEC varimax : scores d'especes tournes, puis correlation ---
+scoV <- scale(Yb) %*% t(pinv(varimax(load0)$loadings))
+cv <- round(cor(Yb, scoV), 3)
+rownames(cv) <- etiqueter(rownames(cv)); colnames(cv) <- paste0("PC", c(a, b))
+cat("\n=== AVEC varimax (correlations) - PC", a, "-", b, " ===\n", sep = ""); print(cv)
+
+for (rot in c(FALSE, TRUE)) {
+  
+  if (rot) {                                   # Varimax
+    rload <- unclass(varimax(load0)$loadings)  # traits tournes
+    sco   <- scale(Yb) %*% t(pinv(rload))      # especes tournees
+    pc    <- colSums(rload^2) / sum(colSums(rload^2)) * sum(eigs[c(a, b)])
+    lab   <- paste0("PC", c(a, b), " varimax (", round(pc, 1), "%)")
+  } else {
+    rload <- load0 ; sco <- site0
+    lab   <- paste0("PC", c(a, b), " (", round(eigs[c(a, b)], 1), "%)")
+  }
+  
+  fol   <- intersect(fol_select, rownames(rload))
+  rac   <- intersect(rac_select, rownames(rload))
+  amult <- 0.9 * max(abs(sco[, 1:2])) / max(abs(rload[, 1:2]))   # fleches a l'echelle du nuage
+  Ar    <- rload[, 1:2] * amult
+  lim   <- max(abs(rbind(sco[, 1:2], Ar))) * 1.1
+  
+  plot(sco[, 1:2], asp = 1, xlim = c(-lim, lim), ylim = c(-lim, lim),
+       pch = 21, cex = 1.4, bg = col.stat[as.character(grp)],
+       xlab = lab[1], ylab = lab[2],
+       main = paste("ACP especes + traits", if (rot) "- varimax" else "- sans rotation"))
+  abline(h = 0, v = 0, lty = 2, col = "grey60")
+  ordiellipse(sco[, 1:2], grp, col = col.stat[levels(grp)], lwd = 2) #ellipses a 1 ecart-type
+  # ordiellipse(sco[, 1:2], grp, kind = "sd", conf = 0.95, col = col.stat[levels(grp)], lwd = 2) #ellipses a 95%
+  
+  #Paragraphe similaire à celui en dessous, mais n'empêchant pas le chevauchement des étiquettes
+  # arrows(0, 0, Ar[fol, 1], Ar[fol, 2], length = 0.08, col = COL_FOL, lwd = 1.6)
+  # text(Ar[fol, 1], Ar[fol, 2], etiqueter(fol), col = "forestgreen", pos = 3, cex = 0.8, font = 2)
+  # arrows(0, 0, Ar[rac, 1], Ar[rac, 2], length = 0.08, col = COL_RAC, lwd = 1.6)
+  # text(Ar[rac, 1], Ar[rac, 2], etiqueter(rac), col = "firebrick", pos = 3, cex = 0.8, font = 2)
+  
+  ## --- fleches ---
+  arrows(0, 0, Ar[fol, 1], Ar[fol, 2], length = 0.08, col = COL_FOL, lwd = 1.6)
+  arrows(0, 0, Ar[rac, 1], Ar[rac, 2], length = 0.08, col = COL_RAC, lwd = 1.6)
+  ## --- étiquettes, mais empêchant le chevauchement ---
+  xy    <- rbind(Ar[fol, 1:2], Ar[rac, 1:2])
+  lab.t <- c(etiqueter(fol), etiqueter(rac))
+  col.t <- c(rep(COL_FOL, length(fol)), rep(COL_RAC, length(rac)))
+  thigmophobe.labels(xy[, 1], xy[, 2], labels = lab.t, col = col.t, cex = 0.8, font = 2)
+  
+  legend("topright", bty = "n", cex = 0.8,
+         legend = c("Traits foliaires", "Traits racinaires", "Indigene", "Exotique"),
+         lty = c(1, 1, NA, NA), lwd = c(2, 2, NA, NA), pch = c(NA, NA, 21, 21),
+         col = c(COL_FOL, COL_RAC, "black", "black"),
+         pt.bg = c(NA, NA, col.stat))
+}
+}
+
+
+
+
+
+## ============================================================================
+## B6. MATRICES DE CORRELATION avec correction (echelle individu, jeu complet)
+## ============================================================================
+PALETTE <- colorRampPalette(c("#0072B2", "white", "#E69F00"))(200)
+
+jeu  <- "complet"
+vars <- c(JEUX[[jeu]]$fol, JEUX[[jeu]]$rac)
+COR  <- preparer(IND, vars)
+colnames(COR) <- etiqueter(colnames(COR))
+res  <- rcorr(as.matrix(COR), type = "pearson")
+
+fl <- etiqueter(JEUX[[jeu]]$fol)
+rc <- etiqueter(JEUX[[jeu]]$rac)
+
+## ---------------------------------------------------------------------------
+## Correction 1 : sur l'ensemble des paires uniques de la matrice
+## ---------------------------------------------------------------------------
+idx   <- upper.tri(res$P)
+q_all <- p.adjust(res$P[idx], method = "BH")
+Q_all <- matrix(NA, nrow(res$P), ncol(res$P), dimnames = dimnames(res$P))
+Q_all[idx] <- q_all
+Q_all[lower.tri(Q_all)] <- t(Q_all)[lower.tri(Q_all)]
+diag(Q_all) <- 0
+
+## ---------------------------------------------------------------------------
+## Correction 2 : sur le seul bloc foliaire x racinaire
+## ---------------------------------------------------------------------------
+P_bloc <- res$P[fl, rc, drop = FALSE]
+P_bh   <- matrix(p.adjust(as.vector(P_bloc), method = "BH"),
+                 nrow = nrow(P_bloc), dimnames = dimnames(P_bloc))
+
+## --- Sorties console ---
+cat("\n===== MATRICE COMPLETE =====\n")
+cat("paires uniques testees         :", sum(idx), "\n")
+cat("significatives (p brut < 0,05) :", sum(res$P[idx] < 0.05, na.rm = TRUE),
+    sprintf("| attendu par hasard : %.1f\n", sum(idx) * 0.05))
+cat("significatives (BH < 0,05)     :", sum(q_all < 0.05, na.rm = TRUE), "\n")
+
+cat("\n===== BLOC FOLIAIRE x RACINAIRE =====\n")
+cat("paires testees                 :", sum(!is.na(P_bloc)), "\n")
+cat("significatives (p brut < 0,05) :", sum(P_bloc < 0.05, na.rm = TRUE),
+    sprintf("| attendu par hasard : %.1f\n", sum(!is.na(P_bloc)) * 0.05))
+cat("significatives (BH < 0,05)     :", sum(P_bh < 0.05, na.rm = TRUE), "\n\n")
+cat("-- coefficients r --\n");    print(round(res$r[fl, rc], 2))
+cat("\n-- p brutes --\n");        print(round(P_bloc, 3))
+cat("\n-- p ajustees (BH) --\n"); print(round(P_bh, 3))
+
+## ---------------------------------------------------------------------------
+## FIGURES
+## ---------------------------------------------------------------------------
+
+## --- A : matrice complete, significativite brute (asterisques) ---
+P_all <- res$P
+P_all[is.na(P_all)] <- 1        # diagonale : pas un test, donc non significative
+
+corrplot(res$r, method = "color", type = "upper", col = PALETTE,
+         p.mat = P_all, sig.level = 0.05, insig = "label_sig",
+         pch = "*", pch.cex = 0.9, pch.col = "black",
+         tl.col = "black", tl.cex = 0.55, tl.srt = 45,
+         title = paste0("Correlations entre tous les traits (n = ", nrow(COR), ")"),
+         mar = c(0, 0, 1.5, 0))
+
+## --- B : matrice complete, apres correction ---
+corrplot(res$r, method = "color", type = "upper", col = PALETTE,
+         p.mat = Q_all, sig.level = 0.05, insig = "blank",
+         tl.col = "black", tl.cex = 0.55, tl.srt = 45,
+         title = "Significatives apres correction (FDR < 0,05)",
+         mar = c(0, 0, 1.5, 0))
+
+## --- C : bloc foliaire x racinaire, significativite brute (asterisques) ---
+corrplot(res$r[fl, rc], method = "color", col = PALETTE,
+         p.mat = P_bloc, sig.level = 0.05, insig = "label_sig",
+         pch = "*", pch.cex = 1.1, pch.col = "black",
+         tl.col = "black", tl.cex = 0.8, tl.srt = 45,
+         title = paste0("Correlations foliaire x racinaire (",
+                        sum(!is.na(P_bloc)), " paires)"),
+         mar = c(0, 0, 1.5, 0))
+
+## --- D : bloc foliaire x racinaire, apres correction ---
+corrplot(res$r[fl, rc], method = "color", col = PALETTE,
+         p.mat = P_bh, sig.level = 0.05, insig = "blank",
+         tl.col = "black", tl.cex = 0.8, tl.srt = 45,
+         title = "Significatives apres correction (FDR < 0,05)",
+         mar = c(0, 0, 1.5, 0))
+
+
+
+
+
+
+
+
+
+
+## ============================================================================
+## C. Question 3 - indigenes vs exotiques dans l'espace fonctionnel
+##    Echelle espece, traits selectionnes, sans rotation.
+##    (1) ACP + PERMANOVA, distance euclidienne
+##    (2) PCoA + PERMANOVA, distance de Gower (Borcard et al. 2018, sect. 5.5)
+## ============================================================================
+ESP$Statut <- IND$Statut[match(ESP$SP_code, IND$SP_code)]
+vars    <- c(fol_select, rac_select)
+keep    <- complete.cases(ESP[, vars])
+grp     <- factor(ESP$Statut[keep])
+col.grp <- c(Indigene = COL_IND, Exotique = COL_EXO)
+table(grp)                                     # attendu : 17 indigenes / 12 exotiques
+
+## ------------------------------------------------------------------ (1) ACP
+Y   <- preparer(ESP, vars)                     # Box-Cox + standardise
+pca <- rda(Y)
+eig <- 100 * pca$CA$eig / sum(pca$CA$eig)
+sit <- scores(pca, display = "sites", choices = 1:2, scaling = 1)
+
+plot(sit, asp = 1, pch = 21, cex = 1.3, bg = col.grp[as.character(grp)],
+     xlab = paste0("PC1 (", round(eig[1], 1), " %)"),
+     ylab = paste0("PC2 (", round(eig[2], 1), " %)"),
+     main = "ACP : indigenes vs exotiques")
+abline(h = 0, v = 0, lty = 3, col = "grey60")
+ordiellipse(sit, grp, col = col.grp[levels(grp)], lwd = 2)   # 1 ecart-type
+legend("topright", names(col.grp), pch = 21, pt.bg = col.grp, bty = "n")
+
+## Test : difference de position ? (distance euclidienne)
+eucl <- dist(Y)
+(adonis2(eucl ~ grp, permutations = 9999))
+permutest(betadisper(eucl, grp), permutations = 9999)
+
+## ----------------------------------------------------------------- (2) PCoA
+gow  <- vegdist(ESP[keep, vars], method = "gower")
+pcoa <- cmdscale(gow, k = nrow(Y) - 1, eig = TRUE)
+pct  <- 100 * pcoa$eig[1:2] / sum(pcoa$eig[pcoa$eig > 0])
+sco  <- pcoa$points[, 1:2]
+
+plot(sco, asp = 1, pch = 21, cex = 1.3, bg = col.grp[as.character(grp)],
+     xlab = paste0("PCoA 1 (", round(pct[1], 1), " %)"),
+     ylab = paste0("PCoA 2 (", round(pct[2], 1), " %)"),
+     main = "PCoA (Gower) - indigenes vs exotiques")
+abline(h = 0, v = 0, lty = 3, col = "grey60")
+ordiellipse(sco, grp, col = col.grp[levels(grp)], lwd = 2)   # 1 ecart-type
+legend("topright", names(col.grp), pch = 21, pt.bg = col.grp, bty = "n")
+
+## Projection a posteriori des traits
+Y_lab <- Y
+colnames(Y_lab) <- etiqueter(colnames(Y_lab))
+(trait.ef <- envfit(pcoa, Y_lab, permutations = 999))
+plot(trait.ef, col = "grey20", cex = 0.8)
+
+## ------------------------------------------------------------- Recapitulatif
+cat("\n--- PERMANOVA euclidienne (ACP) ---\n"); print(adonis2(eucl ~ grp, permutations = 9999))
+cat("\n--- betadisper euclidien ---\n");        print(permutest(betadisper(eucl, grp), permutations = 9999))
+cat("\n--- PERMANOVA Gower (PCoA) ---\n");      print(adonis2(gow ~ grp, permutations = 9999))
+cat("\n--- betadisper Gower ---\n");            print(permutest(betadisper(gow, grp), permutations = 9999))
+
+## ============================================================================
+## C bis. Espece excentree : identification, profil et analyse de sensibilite
+## ============================================================================
+info <- data.frame(
+  Code   = ESP$SP_code[keep],
+  Statut = as.character(grp),
+  PCoA1  = round(sco[, 1], 3),
+  PCoA2  = round(sco[, 2], 3)
+)
+info$Espece <- TAXONOMIE$Espece[match(info$Code, TAXONOMIE$SP_code)]
+cat("\n--- Especes les plus excentrees sur PCoA1 ---\n")
+print(head(info[order(-info$PCoA1), ], 5))
+
+out <- which.max(sco[, 1])
+cat("\nEspece retiree :", ESP$SP_code[keep][out], "\n")
+
+## --- Profil de l'espece (ecarts a la moyenne, en ecarts-types) ---
+z <- preparer(ESP, vars)
+rownames(z) <- ESP$SP_code[keep]
+cat("\n--- Profil standardise ---\n")
+print(round(z[ESP$SP_code[keep][out], ], 2))
+
+## --- Donnees sans cette espece ---
+TR2   <- ESP[keep, vars][-out, ]
+grp2  <- droplevels(grp[-out])
+gow2  <- vegdist(TR2, method = "gower")
+eucl2 <- dist(Y[-out, ])
+
+## --- PCoA recalculee ---
+pcoa2 <- cmdscale(gow2, k = nrow(TR2) - 1, eig = TRUE)
+pct2  <- 100 * pcoa2$eig[1:2] / sum(pcoa2$eig[pcoa2$eig > 0])
+sco2  <- pcoa2$points[, 1:2]
+
+plot(sco2, asp = 1, pch = 21, cex = 1.3, bg = col.grp[as.character(grp2)],
+     xlab = paste0("PCoA 1 (", round(pct2[1], 1), " %)"),
+     ylab = paste0("PCoA 2 (", round(pct2[2], 1), " %)"),
+     main = paste("PCoA (Gower) - sans", ESP$SP_code[keep][out]))
+abline(h = 0, v = 0, lty = 3, col = "grey60")
+ordiellipse(sco2, grp2, col = col.grp[levels(grp2)], lwd = 2)   # 1 ecart-type
+legend("topright", names(col.grp), pch = 21, pt.bg = col.grp, bty = "n")
+
+Y2_lab <- Y[-out, ]
+colnames(Y2_lab) <- etiqueter(colnames(Y2_lab))
+(trait.ef2 <- envfit(pcoa2, Y2_lab, permutations = 999))
+plot(trait.ef2, col = "grey20", cex = 0.8)
+
+## --- Tests de sensibilite ---
+cat("\n-- Gower sans l'outlier --\n")
+print(adonis2(gow2 ~ grp2, permutations = 9999))
+print(permutest(betadisper(gow2, grp2), permutations = 9999))
+cat("\n-- Euclidienne sans l'outlier --\n")
+print(adonis2(eucl2 ~ grp2, permutations = 9999))
+print(permutest(betadisper(eucl2, grp2), permutations = 9999))
+
+
+
+## ============================================================================
+## C ter. Stade successionnel : confondant du statut d'indigenat
+## ============================================================================
+SUCCESSION <- c(
+  ## Indigenes
+  "Ace Pse"="Intermediaire", "Fra Exc"="Intermediaire", "Ace Pla"="Intermediaire",
+  "Cor San"="Arbuste",       "Cra Mon"="Intermediaire", "Sal Alb"="Pionnier",
+  "Sal Cap"="Pionnier",      "Cor Ave"="Intermediaire", "Car Bet"="Intermediaire",
+  "Ile Aqu"="Intermediaire", "Fag Syl"="Tardif",        "Mal Syl"="Pionnier",
+  "Que Rob"="Tardif",        "Que Pet"="Tardif",        "Bet Pen"="Pionnier",
+  "Sam Nig"="Intermediaire", "Pru Avi"="Intermediaire",
+  ## Exotiques
+  "Sym Alb"="Arbuste",       "Pru Ser"="Pionnier",      "Rob Pse"="Pionnier",
+  "Til sp" ="Intermediaire", "Que Rub"="Intermediaire", "Rib Rub"="Arbuste",
+  "Pru Cer"="Pionnier",      "Ulm Min"="Pionnier",      "Lig Ova"="Arbuste",
+  "Pru Lau"="Arbuste",       "Mah Aqu"="Arbuste",       "Cas Sat"="Pionnier"
+)
+
+codes <- ESP$SP_code[keep]
+succ  <- factor(SUCCESSION[codes],
+                levels = c("Arbuste", "Pionnier", "Intermediaire", "Tardif"))
+stopifnot(!any(is.na(succ)))          # tous les codes reconnus ?
+
+## --- Repartition croisee statut x stade -------------------------------------
+(tb <- table(Statut = grp, Stade = succ))
+cat("\n--- Test exact de Fisher (independance statut x stade) ---\n")
+print(fisher.test(tb))
+
+## --- Le stade structure-t-il l'espace fonctionnel ? --------------------------
+set.seed(1)
+cat("\n--- PERMANOVA Gower ~ stade ---\n")
+print(adonis2(gow ~ succ, permutations = 9999))
+print(permutest(betadisper(gow, succ), permutations = 9999))
+
+## --- Stade et statut : lequel prime ? Les deux ordres d'entree ---------------
+cat("\n--- Gower ~ stade + statut ---\n")
+print(adonis2(gow ~ succ + grp, permutations = 9999, by = "terms"))
+cat("\n--- Gower ~ statut + stade ---\n")
+print(adonis2(gow ~ grp + succ, permutations = 9999, by = "terms"))
+
+## --- Sensibilite : especes mixtes basculees vers leur SECOND terme -----------
+succ_alt <- as.character(succ)
+mixte <- c("Mal Syl","Que Rub","Pru Cer","Ulm Min","Cas Sat")
+succ_alt[match(mixte, codes)] <- c("Intermediaire","Tardif","Intermediaire",
+                                   "Intermediaire","Intermediaire")
+succ_alt <- factor(succ_alt, levels = levels(succ))
+cat("\n--- Sensibilite (codage alternatif) ---\n")
+print(adonis2(gow ~ succ_alt, permutations = 9999))
+
+## --- Figure : forme = stade, remplissage = statut ---------------------------
+pch.succ <- c(Arbuste = 21, Pionnier = 22, Intermediaire = 23, Tardif = 24)
+
+plot(sco, asp = 1, type = "n",
+     xlab = paste0("PCoA 1 (", round(pct[1], 1), " %)"),
+     ylab = paste0("PCoA 2 (", round(pct[2], 1), " %)"),
+     main = "PCoA (Gower) - indigenes vs exotiques")
+abline(h = 0, v = 0, lty = 3, col = "grey60")
+points(sco, pch = pch.succ[as.character(succ)],
+       bg = col.grp[as.character(grp)], cex = 1.5)
+ordiellipse(sco, grp, col = col.grp[levels(grp)], lwd = 2)
+plot(trait.ef, col = "grey20", cex = 0.8, p.max = 0.05)   # vecteurs significatifs
+legend("topright",    legend = levels(succ),   pch = pch.succ, bty = "n", cex = 0.75)
+legend("bottomright", legend = names(col.grp), pch = 21, pt.bg = col.grp,
+       bty = "n", cex = 0.75)
+
+## --- Position des trois envahissantes majeures ------------------------------
+inv <- which(codes %in% c("Rob Pse", "Pru Ser", "Que Rub"))
+cat("\n--- Envahissantes dans le plan PCoA ---\n")
+print(data.frame(Code = codes[inv], round(sco[inv, ], 3)))
+
+
+
+## --- Meme analyse sur la distance euclidienne (plan de l'ACP) ---------------
+cat("\n--- PERMANOVA euclidienne ~ stade ---\n")
+print(adonis2(eucl ~ succ, permutations = 9999))
+print(permutest(betadisper(eucl, succ), permutations = 9999))
+
+cat("\n--- Euclidienne ~ stade + statut ---\n")
+print(adonis2(eucl ~ succ + grp, permutations = 9999, by = "terms"))
+cat("\n--- Euclidienne ~ statut + stade ---\n")
+print(adonis2(eucl ~ grp + succ, permutations = 9999, by = "terms"))
+
+## --- Figure equivalente sur le plan de l'ACP --------------------------------
+plot(sit, asp = 1, type = "n",
+     xlab = paste0("PC1 (", round(eig[1], 1), " %)"),
+     ylab = paste0("PC2 (", round(eig[2], 1), " %)"),
+     main = "ACP - statut et stade successionnel")
+abline(h = 0, v = 0, lty = 3, col = "grey60")
+points(sit, pch = pch.succ[as.character(succ)],
+       bg = col.grp[as.character(grp)], cex = 1.5)
+ordiellipse(sit, grp, col = col.grp[levels(grp)], lwd = 2)
+legend("topright",    legend = levels(succ),   pch = pch.succ, bty = "n", cex = 0.8)
+legend("bottomright", legend = names(col.grp), pch = 21,
+       pt.bg = col.grp, bty = "n", cex = 0.8)
+
 
