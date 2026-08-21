@@ -31,7 +31,7 @@ library(pracma)   ## contient des fonctions spécifiques à l'ACP
 
 ############################################################
 #===========================================================
-##                JV: MODELES GLMM                        ##
+##                Jason Vleminckx: MODELES GLMM                        ##
 #===========================================================
 ############################################################
 ## Objectif => tester l'effet de variables de sols sur les traits
