@@ -1,3 +1,18 @@
+## ============================================================================
+## SCRIPT A - GLMM traits x variables edaphiques, question 1
+## Base de code fournie par Jason Vleminckx, adaptee et etendue par
+## Charles Vanderoost (boucle automatisee sur les douze traits, tableau
+## RESULTS, boucle RESULTS2 par variable edaphique prise isolement).
+##
+## Entree : "Traits.csv", version fournie avec le code, dont la nomenclature
+## des colonnes (F_S_S, F_T_M_S, R_L_S, R_D_T) differe de celle produite par
+## le script B (F_SS, F_TMS, R_LS, R_DT). Les donnees sous-jacentes sont
+## identiques ; les deux chaines n'ont pas ete homogeneisees.
+##
+## Sorties : ACP edaphique, GLMM sur composantes principales, GLMM par
+## variable edaphique.
+## ============================================================================
+
 getwd()
 setwd("C:/Users/charl/Desktop/Etudes/Master 2/Mémoire/Tableaux")
 rm(list=ls())
@@ -106,7 +121,8 @@ PCA.SOIL = rda(SOIL3)
 library(paran)
 paran = paran(SOIL3, iterations = 1000)
 paran
-# => 2 axes retenus
+## Horn retient 1 axe. Deux composantes ont neanmoins ete conservees : elles
+## cumulent 71,1 % de la variance edaphique
 
 ## Pourcentage de variation de E expliqué par chaque composante principale:
 eigs <- PCA.SOIL$CA$eig/sum(PCA.SOIL$CA$eig)*100 ; eigs
@@ -384,11 +400,6 @@ for(j in 1:ncol(TRAITS2)){
   }
 }
 
-## Etape importante => Elimination des valeurs "aberrantes":
-#-----------------------------------------------------------
-#plot(TRAITS2$R_K)
-#w = which(TRAITS2$R_K<0.79985) ; w
-#TRAITS2$R_K[w] > min(TRAITS2$R_K[-w])
 
 ## Normalisation BoxCox:
 for(i in 1:ncol(TRAITS2)){
@@ -446,7 +457,7 @@ round(cor(SOIL3,scores),2)
 
 #-------------------------------------------------------------
 # GLMM AUTOMATIQUES POUR TOUS LES TRAITS
-# Effets de PC1 et PC2, contrôle de CIRC, effet aléatoire GEN
+# Effets de PC1 et PC2, contrôle de CIRC, effet aléatoire SP
 #-------------------------------------------------------------
 library(glmmTMB)
 library(dplyr)
@@ -574,149 +585,170 @@ for(i in 1:ncol(SOIL3)){  ## pour chaque variable édaphique...
 RESULTS2
 
 
-#----------------------------------------------------------------
-##                        HEATMAPS                             ##
-## Création d'un nouvel objet "SCORES2" reprenant les variables
-## explicatives choisies pour faire des modèles GLMM INTERACTIFS
-#----------------------------------------------------------------
-#w = which(colnames(SCORES)%in%c("R_Mg","pH","Mn","IND","SP","CIRC"))
-#SCORES2 = SCORES[,w] ; head(SCORES2)
-#colnames(SCORES2) = c("IND","SP","CIRC","Y","X1","X2")
-#head(SCORES2)
-
-# Modèle avec interaction
-# ------------------------------------------------------------
-MOD <- glmmTMB(
-  Y ~ X1 * X2 + CIRC + (1 | SP/IND),
-  data = SCORES2,
-  family = gaussian()
-)
-summary(MOD)
-
-# Comparer au modèle additif
-# ------------------------------------------------------------
-#mod_RTD_add <- glmmTMB(
-#  R_TD ~ PC1 + PC2 + CIRC + (1 | SP),
-#  data = SCORES,
-#  family = gaussian()
-#)
-#AIC(mod_RTD_add, mod_RTD_inter)
-#anova(mod_RTD_add, mod_RTD_inter)
-
-# Grille de prédiction
-# ------------------------------------------------------------
-pred_grid <- expand.grid(
-  X1 = seq(
-    min(SCORES2$X1, na.rm = TRUE),
-    max(SCORES2$X1, na.rm = TRUE),
-    length.out = 200
-  ),
-  X2 = seq(
-    min(SCORES2$X2, na.rm = TRUE),
-    max(SCORES2$X2, na.rm = TRUE),
-    length.out = 200
-  ),
-  CIRC = mean(SCORES2$CIRC, na.rm = TRUE),
-  
-  # Nécessaire pour que predict() trouve la variable GEN.
-  # Elle n'influence pas les prédictions car re.form = NA.
-  #GEN = levels(factor(SCORES$GEN))[1]
-  SPE = levels(factor(SCORES$SP))[1]
-)
-
-# Prédictions populationnelles
-# ----------------------------
-pred_grid$TRAIT <- predict(
-  MOD,
-  newdata = pred_grid,
-  type = "response",
-  re.form = NA,
-  allow.new.levels = TRUE
-)
-
-# Heatmap
-# --------
-HEATMAP <- ggplot(
-  pred_grid,
-  #pred_grid_hull,
-  aes(
-    x = X1,
-    y = X2,
-    fill = TRAIT
-  )
-) +
-  
-  geom_raster(
-    interpolate = TRUE
-  ) +
-  
-  geom_contour(
-    aes(z = TRAIT),
-    colour = "white",
-    linewidth = 0.45,
-    alpha = 0.75
-  ) +
-  
-  # Montrer l'espace réellement échantillonné
-  geom_point(
-    data = SCORES2,
-    aes(
-      x = X1,
-      y = X2
-    ),
-    inherit.aes = FALSE,
-    shape = 21,
-    fill = "white",
-    colour = "black",
-    size = 2.1,
-    stroke = 0.45,
-    alpha = 0.75
-  ) +
-  
-  scale_fill_viridis_c(
-    option = "magma",
-    name = "Predicted\nR_TD"
-  ) +
-  
-  labs(
-    x = "Soil PC1",
-    y = "Soil PC2",
-    title = "Predicted root tissue density",
-    subtitle = "Interactive effect of soil PC1 and PC2"
-  ) +
-  
-  coord_equal(
-    expand = FALSE
-  ) +
-  
-  theme_classic(base_size = 15) +
-  
-  theme(
-    axis.title = element_text(
-      size = 17,
-      face = "bold"
-    ),
-    axis.text = element_text(
-      size = 13,
-      colour = "black"
-    ),
-    plot.title = element_text(
-      size = 19,
-      face = "bold"
-    ),
-    plot.subtitle = element_text(
-      size = 13
-    ),
-    legend.title = element_text(
-      size = 13,
-      face = "bold"
-    ),
-    legend.text = element_text(
-      size = 12
-    )
-  )
-HEATMAP
-
-p
-round(cor(SOIL3,scores),2)
-
+# #----------------------------------------------------------------
+# ##                    HEATMAPS : piste non retenue            
+# ## Création d'un nouvel objet "SCORES2" reprenant les variables
+# ## explicatives choisies pour faire des modèles GLMM INTERACTIFS
+# #----------------------------------------------------------------
+# #w = which(colnames(SCORES)%in%c("R_Mg","pH","Mn","IND","SP","CIRC"))
+# #SCORES2 = SCORES[,w] ; head(SCORES2)
+# #colnames(SCORES2) = c("IND","SP","CIRC","Y","X1","X2")
+# #head(SCORES2)
+# 
+# # Modèle avec interaction
+# # ------------------------------------------------------------
+# MOD <- glmmTMB(
+#   Y ~ X1 * X2 + CIRC + (1 | SP/IND),
+#   data = SCORES2,
+#   family = gaussian()
+# )
+# summary(MOD)
+# 
+# # Comparer au modèle additif
+# # ------------------------------------------------------------
+# #mod_RTD_add <- glmmTMB(
+# #  R_TD ~ PC1 + PC2 + CIRC + (1 | SP),
+# #  data = SCORES,
+# #  family = gaussian()
+# #)
+# #AIC(mod_RTD_add, mod_RTD_inter)
+# #anova(mod_RTD_add, mod_RTD_inter)
+# 
+# # Grille de prédiction
+# # ------------------------------------------------------------
+# pred_grid <- expand.grid(
+#   X1 = seq(
+#     min(SCORES2$X1, na.rm = TRUE),
+#     max(SCORES2$X1, na.rm = TRUE),
+#     length.out = 200
+#   ),
+#   X2 = seq(
+#     min(SCORES2$X2, na.rm = TRUE),
+#     max(SCORES2$X2, na.rm = TRUE),
+#     length.out = 200
+#   ),
+#   CIRC = mean(SCORES2$CIRC, na.rm = TRUE),
+#   
+#   # Nécessaire pour que predict() trouve la variable GEN.
+#   # Elle n'influence pas les prédictions car re.form = NA.
+#   #GEN = levels(factor(SCORES$GEN))[1]
+#   SPE = levels(factor(SCORES$SP))[1]
+# )
+# 
+# # Prédictions populationnelles
+# # ----------------------------
+# pred_grid$TRAIT <- predict(
+#   MOD,
+#   newdata = pred_grid,
+#   type = "response",
+#   re.form = NA,
+#   allow.new.levels = TRUE
+# )
+# 
+# # Heatmap
+# # --------
+# HEATMAP <- ggplot(
+#   pred_grid,
+#   #pred_grid_hull,
+#   aes(
+#     x = X1,
+#     y = X2,
+#     fill = TRAIT
+#   )
+# ) +
+#   
+#   geom_raster(
+#     interpolate = TRUE
+#   ) +
+#   
+#   geom_contour(
+#     aes(z = TRAIT),
+#     colour = "white",
+#     linewidth = 0.45,
+#     alpha = 0.75
+#   ) +
+#   
+#   # Montrer l'espace réellement échantillonné
+#   geom_point(
+#     data = SCORES2,
+#     aes(
+#       x = X1,
+#       y = X2
+#     ),
+#     inherit.aes = FALSE,
+#     shape = 21,
+#     fill = "white",
+#     colour = "black",
+#     size = 2.1,
+#     stroke = 0.45,
+#     alpha = 0.75
+#   ) +
+#   
+#   scale_fill_viridis_c(
+#     option = "magma",
+#     name = "Predicted\nR_TD"
+#   ) +
+#   
+#   labs(
+#     x = "Soil PC1",
+#     y = "Soil PC2",
+#     title = "Predicted root tissue density",
+#     subtitle = "Interactive effect of soil PC1 and PC2"
+#   ) +
+#   
+#   coord_equal(
+#     expand = FALSE
+#   ) +
+#   
+#   theme_classic(base_size = 15) +
+#   
+#   theme(
+#     axis.title = element_text(
+#       size = 17,
+#       face = "bold"
+#     ),
+#     axis.text = element_text(
+#       size = 13,
+#       colour = "black"
+#     ),
+#     plot.title = element_text(
+#       size = 19,
+#       face = "bold"
+#     ),
+#     plot.subtitle = element_text(
+#       size = 13
+#     ),
+#     legend.title = element_text(
+#       size = 13,
+#       face = "bold"
+#     ),
+#     legend.text = element_text(
+#       size = 12
+#     )
+#   )
+# HEATMAP
+# 
+# p
+# round(cor(SOIL3,scores),2)
+# 
+# 
+# ## Si on veut seulement les zone de haute confiance prédictible:
+# #---------------------------------------------------------------
+# #library(sf)
+# # Points observés
+# #obs_sf <- st_as_sf(
+# #  SCORES,
+# #  coords = c("PC1", "PC2")
+# #)
+# # Enveloppe convexe
+# #hull <- st_convex_hull(st_union(obs_sf))
+# # Grille sous forme spatiale
+# #grid_sf <- st_as_sf(
+# #  pred_grid,
+# #  coords = c("PC1", "PC2")
+# #)
+# # Garder seulement les prédictions dans l'espace observé
+# #inside <- lengths(st_within(grid_sf, hull)) > 0
+# #pred_grid_hull <- pred_grid[inside, ]
+# ## Ensuite remplacer pred_grid par pred_grid_hull dans le code ggplot
+# 
