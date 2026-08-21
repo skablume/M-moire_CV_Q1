@@ -1,0 +1,722 @@
+getwd()
+setwd("C:/Users/charl/Desktop/Etudes/Master 2/Mémoire/Tableaux")
+rm(list=ls())
+
+## Packages
+#----------
+
+pkgs <- c(
+  "vegan","forecast","pracma","car","ape","ecodist","adespatial","dplyr",
+  "MASS","ggplot2","emmeans","multcomp","multcompView",
+  "ggrepel","scales","corrplot","Hmisc"   # Hmisc pour mean_cl_normal
+)
+
+## Installer ceux qui manquent
+to_install <- pkgs[ !pkgs %in% rownames(installed.packages()) ]
+if(length(to_install)) install.packages(to_install, dependencies = TRUE)
+
+## Charger tous les packages
+invisible(lapply(pkgs, function(p) library(p, character.only = TRUE)))
+
+## Vérification
+search()
+
+R.version.string
+
+library(vegan)    ## contient de nombreuse fonctions utiles (package basique en écologie)
+library(forecast) ## contient des fonctions qui permettent de normaliser les données
+library(pracma)   ## contient des fonctions spécifiques à l'ACP
+
+
+
+############################################################
+#===========================================================
+##                JV: MODELES GLMM                        ##
+#===========================================================
+############################################################
+## Objectif => tester l'effet de variables de sols sur les traits
+library(vegan)    ## contient de nombreuse fonctions utiles (package basique en écologie)
+library(forecast) ## contient des fonctions qui permettent de normaliser les données
+library(pracma)   ## contient des fonctions spécifiques à l'ACP
+library(dplyr)
+
+X <- read.table("Traits.csv", header = TRUE,sep = ";",dec = ",")
+head(X) ; dim(X)
+
+Leaf_traits = c("F_S_S","F_Mg","F_K","F_P","F_S","F_T_M_S")
+root_traits = c("R_L_S","R_D_T","R_D","R_Mg","R_K","R_P")
+soil_var    = c("S_pH","S_C","S_Al","S_Mg","S_K","S_Mn","S_P")
+
+LEAFS = cbind(X$I_Co,X$Espece,X$Genre,X$Famille,X$I_Ci,X[,which(colnames(X)%in%Leaf_traits)]) 
+colnames(LEAFS) = c("IND","SP","GEN","FAM","CIRC","SLA","L_Mg","L_K","L_P","L_S","L_TMS")
+head(LEAFS) ; dim(LEAFS)
+
+ROOTS = cbind(X$I_Co,X$Espece,X$Genre,X$Famille,X$I_Ci,X[,which(colnames(X)%in%root_traits)]) 
+colnames(ROOTS) = c("IND","SP","GEN","FAM","CIRC","SRL","R_TD","R_Diam","R_Mg","R_K","R_P")
+head(ROOTS) ; dim(ROOTS)
+
+TRAITS = cbind(LEAFS,ROOTS[,-c(1:5)]) ; head(TRAITS) ; dim(TRAITS)
+
+SOIL = cbind(X$I_Co,X$Espece,X$Genre,X$Famille,X$I_Ci,X[,which(colnames(X)%in%soil_var)]) 
+colnames(SOIL) = c("IND","SP","GEN","FAM","CIRC","pH","Cond","Al","Mg","K","Mn","P")
+## Retirer les répétitions par individus
+SOIL1 <- SOIL |> distinct(IND, .keep_all = TRUE)
+head(SOIL1) ; dim(SOIL1)
+
+#===========================================================================
+## (1) PCA sur les variables de sols pour choisir les variables explicatives
+## dans les GLMM
+#===========================================================================
+remove_lines = which(is.na(SOIL1$pH)) ; remove_lines
+SOIL0 = SOIL1[-remove_lines,]        ; head(SOIL0) ; dim(SOIL0)
+SOIL2 = SOIL1[-remove_lines,-c(1:5)] ; head(SOIL2) ; dim(SOIL2)
+
+## Normalisation BoxCox:
+for(i in 1:ncol(SOIL2)){
+  lambda1 <- BoxCox.lambda(SOIL2[,i]+abs(min(SOIL2[,i]))+0.0000000001,
+                           method = "loglik", lower = -5,  upper = 5) 
+  SOIL2[,i]  <- BoxCox(SOIL2[,i], lambda=lambda1)
+}
+
+## Distribution des données avant et après normalisation:
+plot(density(SOIL1$pH[-remove_lines]))
+plot(density(SOIL2$pH))
+
+## Standardisation des données (moyenne = 0 et écart-type = 1 pour chaque variable):
+## Obligatoire quand on compare des variables différentes !!
+library(vegan)
+SOIL3 = decostand(SOIL2,"standardize") ; head(SOIL3) ; dim(SOIL3)
+
+## vérification => moyennes = 0 et écarts-types = 1
+colMeans(SOIL3) 
+sd(SOIL3$pH)    
+sd(SOIL3$Cond)   
+
+a=1;b=2
+#a=3;b=4
+par(mfrow=c(1,1),mex=0.4)
+
+head(SOIL) ; dim(SOIL)
+head(SOIL3);dim(SOIL3)
+
+## PCA with vegan:
+PCA.SOIL = rda(SOIL3)
+
+# install.packages("paran")
+library(paran)
+paran = paran(SOIL3, iterations = 1000)
+paran
+# => 2 axes retenus
+
+## Pourcentage de variation de E expliqué par chaque composante principale:
+eigs <- PCA.SOIL$CA$eig/sum(PCA.SOIL$CA$eig)*100 ; eigs
+barplot(eigs,col=c(rep("black",2),rep("grey",5)))
+
+# Rotation varimax des axes
+loading = vegan::scores(PCA.SOIL, choices=c(a:b))$species    #choices determines which pc to be taken
+rloading = varimax(loading)$loadings
+iloading = t(pinv(rloading));iloading
+scores = scale(SOIL3) %*% iloading
+
+scores = vegan::scores(PCA.SOIL, choices=c(a:b))$sites ## si pas de rotation varimax
+
+rloading = loading ## si on n'utilise pas varimax
+
+r = range(c(rloading, scores))
+plot(scores, xlim = c(-3,3), ylim= c(-3,3), xlab= "PC1 ", ylab= "PC2 ",col="white")
+arrows(0, 0, rloading[,1]*1, rloading[,2]*1, length=0.1, col="black")
+text(rloading[,1], rloading[,2], labels = colnames(SOIL3), cex=1.5, pos=3, 
+     col="blue")
+abline(h=0,v=0,lty=2)
+#text(scores[,1]*0.7, scores[,2]*0.7,cex=2, col="blue")
+points(scores[,1]*3, scores[,2]*3,pch=17, cex=1.5)
+
+#=======================================================================
+## Nouveau code pour PCA avec varimax et coloration des individus selon
+## l'espèce, le genre ou la famille (au choix)
+#=======================================================================
+library(vegan)
+library(MASS)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+library(grid)
+
+# ------------------------------------------------------------
+# Choisir la variable de coloration
+# ------------------------------------------------------------
+group_var <- "SP"
+group_var <- "GEN"
+group_var <- "FAM"
+
+# PCA SANS ROTATION VARIMAX
+#--------------------------
+PCA.SOIL <- vegan::rda(SOIL3)
+
+library(vegan)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+library(grid)
+
+# Scores des individus
+# --------------------
+scores <- vegan::scores(
+  PCA.SOIL,
+  choices = 1:2,
+  display = "sites",
+  scaling = 1
+)
+
+scores_df <- as.data.frame(scores)
+colnames(scores_df) <- c("PC1", "PC2")
+dim(scores_df)
+
+# Ajouter les informations des individus
+# --------------------------------------
+stopifnot(nrow(SOIL0) == nrow(scores_df))
+scores_df <- dplyr::bind_cols(
+  SOIL0 |>
+    dplyr::select(IND, SP, GEN, FAM, CIRC),
+  scores_df
+)
+
+scores_df <- scores_df |>
+  dplyr::mutate(
+    GROUP = factor(.data[[group_var]])
+  )
+
+# Loadings des variables de sol
+# -----------------------------
+loading <- vegan::scores(
+  PCA.SOIL,
+  choices = 1:2,
+  display = "species",
+  scaling = 1
+)
+loadings_df <- as.data.frame(loading)
+
+colnames(loadings_df) <- c("PC1", "PC2")
+
+loadings_df <- loadings_df |>
+  tibble::rownames_to_column("Variable")
+
+# Ajuster la longueur des flèches
+# --------------------------------
+arrow_mult <- 0.75 * min(
+  max(abs(scores_df$PC1), na.rm = TRUE) /
+    max(abs(loadings_df$PC1), na.rm = TRUE),
+  
+  max(abs(scores_df$PC2), na.rm = TRUE) /
+    max(abs(loadings_df$PC2), na.rm = TRUE)
+)
+
+loadings_df <- loadings_df |>
+  dplyr::mutate(
+    PC1_plot = PC1 * arrow_mult,
+    PC2_plot = PC2 * arrow_mult
+  )
+
+# Pourcentage de variation expliqué
+#----------------------------------
+eigs <- PCA.SOIL$CA$eig /
+  sum(PCA.SOIL$CA$eig) * 100
+
+PC1_percent <- round(eigs[1], 1)
+PC2_percent <- round(eigs[2], 1)
+
+# Graphique
+# --------
+p <- ggplot(
+  scores_df,
+  aes(
+    x = PC1,
+    y = PC2,
+    colour = GROUP
+  )
+) +
+  
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.4,
+    colour = "grey65"
+  ) +
+  
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.4,
+    colour = "grey65"
+  ) +
+  
+  geom_point(
+    size = 3,
+    alpha = 0.8
+  ) +
+  
+  geom_segment(
+    data = loadings_df,
+    aes(
+      x = 0,
+      y = 0,
+      xend = PC1_plot,
+      yend = PC2_plot
+    ),
+    inherit.aes = FALSE,
+    linewidth = 0.8,
+    colour = "black",
+    arrow = grid::arrow(
+      length = grid::unit(0.22, "cm"),
+      type = "closed"
+    )
+  ) +
+  
+  ggrepel::geom_text_repel(
+    data = loadings_df,
+    aes(
+      x = PC1_plot,
+      y = PC2_plot,
+      label = Variable
+    ),
+    inherit.aes = FALSE,
+    size = 5,
+    fontface = "bold",
+    colour = "black",
+    box.padding = 0.4,
+    point.padding = 0.2,
+    seed = 123
+  ) +
+  
+  labs(
+    x = paste0("PC1 (", PC1_percent, "%)"),
+    y = paste0("PC2 (", PC2_percent, "%)"),
+    colour = switch(
+      group_var,
+      SP  = "Species",
+      GEN = "Genus",
+      FAM = "Family"
+    )
+  ) +
+  
+  coord_equal() +
+  
+  theme_classic(base_size = 15) +
+  
+  theme(
+    axis.title = element_text(
+      size = 17,
+      face = "bold"
+    ),
+    axis.text = element_text(
+      size = 13,
+      colour = "black"
+    ),
+    legend.title = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 11
+    )
+  )
+
+p
+
+## Effet taxonomique (GEN, FAM) sur l'ordination?
+#-------------------------------------------------
+## Permanova
+library(vegan)
+
+head(SOIL0) ; dim(SOIL0)
+head(SOIL3) ; dim(SOIL3)
+SOIL4=cbind(SOIL0[,1:5],SOIL3)
+head(SOIL4) ; dim(SOIL4)
+
+## test de l'effet "Famille" sur l'ordination des individus
+perm <- adonis2(
+  SOIL3 ~ FAM,
+  data = SOIL4,
+  method = "euclidean",
+  permutations = 9999
+)
+perm
+
+## test de l'effet "genre" sur l'ordination des individus
+perm <- adonis2(
+  SOIL3 ~ GEN,
+  data = SOIL4,
+  method = "euclidean",
+  permutations = 9999
+)
+perm
+
+## test de l'effet "espèce" sur l'ordination des individus
+perm <- adonis2(
+  SOIL3 ~ SP,
+  data = SOIL4,
+  method = "euclidean",
+  permutations = 9999
+)
+perm
+
+
+#===============================================================
+## Harmonisation des lignes entre données sol et données traits,
+## et normalisation-standardisation des traits:
+#===============================================================
+head(TRAITS) ; dim(TRAITS)
+## Retirer les répétitions par individus
+TRAITS1 <- TRAITS |> distinct(IND, .keep_all = TRUE)
+head(TRAITS1) ; dim(TRAITS1)
+
+remove_lines = which(is.na(SOIL1$pH)) ; remove_lines
+TRAITS0 = TRAITS1[-remove_lines,]     ; head(TRAITS0) ; dim(TRAITS0)
+TRAITS2 = TRAITS1[-remove_lines,-c(1:5)] ; head(TRAITS2) ; dim(TRAITS2)
+
+## Remplacement des quelques valeurs manquantes par la moyenne:
+for(j in 1:ncol(TRAITS2)){
+  wna = which(is.na(TRAITS2[,j]))
+  if(length(wna>0)){
+    TRAITS2[wna,j] = mean(TRAITS2[,j],na.rm=TRUE)
+  }
+}
+
+## Etape importante => Elimination des valeurs "aberrantes":
+#-----------------------------------------------------------
+#plot(TRAITS2$R_K)
+#w = which(TRAITS2$R_K<0.79985) ; w
+#TRAITS2$R_K[w] > min(TRAITS2$R_K[-w])
+
+## Normalisation BoxCox:
+for(i in 1:ncol(TRAITS2)){
+  lambda1 <- BoxCox.lambda(TRAITS2[,i]+abs(min(TRAITS2[,i]))+0.0000000001,
+                           method = "loglik", lower = -3,  upper = 3) 
+  TRAITS2[,i]  <- BoxCox(TRAITS2[,i], lambda=lambda1)
+}
+head(TRAITS2)
+
+## Distribution des données avant et après normalisation:
+plot(density(TRAITS1$L_Mg[-remove_lines]))
+plot(density(TRAITS2$L_Mg))
+
+## Standardisation des données (moyenne = 0 et écart-type = 1 pour chaque variable):
+## Obligatoire quand on compare des variables différentes !!
+library(vegan)
+TRAITS3 = decostand(TRAITS2,"standardize") ; head(TRAITS3) ; dim(TRAITS3)
+
+## vérification => moyennes = 0 et écarts-types = 1
+colMeans(TRAITS3) 
+sd(TRAITS3$L_Mg)    
+sd(TRAITS3$R_TD)   
+
+#========================================
+##             Modèles GLMM            ##
+#========================================
+library(glmmTMB)
+
+## scores de l'ACP sur les variables sol
+head(scores) ; dim(scores) 
+
+SCORES = cbind(scores_df[,-ncol(scores_df)],TRAITS3, SOIL3)
+head(SCORES) ; dim(SCORES)
+SCORES$CIRC <- as.numeric(
+  gsub(",", ".", SCORES$CIRC)
+)
+SCORES$CIRC[which(is.na(SCORES$CIRC))] = mean(SCORES$CIRC,na.rm=TRUE)
+head(SCORES) ; dim(SCORES)
+str(SCORES)
+
+m0 = glmmTMB(SRL ~ PC1 + PC2 + CIRC + (1|SP/IND)    ,data=SCORES) ; summary(m0)
+m1 = glmmTMB(SRL ~ PC1 + PC2 + CIRC + (1|SP)        ,data=SCORES) ; summary(m1)
+m2 = glmmTMB(SRL ~ PC1 + PC2 + CIRC + (1|GEN)       ,data=SCORES) ; summary(m2)
+m3 = glmmTMB(SRL ~ PC1 + PC2 + CIRC + (1|FAM)       ,data=SCORES) ; summary(m3)
+m4 = glmmTMB(SRL ~ PC1 + PC2 + CIRC + (1|FAM/GEN)   ,data=SCORES) ; summary(m4)
+m5 = glmmTMB(SRL ~ PC1 + PC2 + CIRC + (1|FAM/GEN/SP),data=SCORES) ; summary(m5)
+ 
+AIC(m0,m1,m2,m3,m4,m5) ## AIC le plus bas = meilleur modèle
+#anova(m1,m2,m3,m4,m5)
+#VarCorr(m2)
+#VarCorr(m3)
+
+round(cor(SOIL3),2)
+round(cor(SOIL3,scores),2)
+
+#-------------------------------------------------------------
+# GLMM AUTOMATIQUES POUR TOUS LES TRAITS
+# Effets de PC1 et PC2, contrôle de CIRC, effet aléatoire GEN
+#-------------------------------------------------------------
+library(glmmTMB)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# Liste des traits à analyser
+# ---------------------------
+traits <- c("SLA","L_Mg","L_K","L_P","L_S","L_TMS",
+            "SRL","R_TD","R_Diam","R_Mg","R_K","R_P")
+
+# Fonction ajustant un modèle pour un trait
+# -----------------------------------------
+fit_trait_model <- function(trait_name, data = SCORES) {
+  formula_trait <- as.formula(
+    paste0(
+      trait_name,
+      " ~ PC1 + PC2 + CIRC + (1 | SP)" ## changer les variables explicatives au choix
+    )
+  )
+  glmmTMB(
+    formula = formula_trait,
+    data = data,
+    family = gaussian()
+  )
+}
+
+# Ajuster tous les modèles
+# ------------------------
+models_traits <- traits |>
+  set_names() |>
+  map(
+    ~ fit_trait_model(
+      trait_name = .x,
+      data = SCORES
+    )
+  )
+# n d'observations et nombre d'especes reellement utilises par chaque GLMM
+sapply(models_traits, nobs)                               # n par trait
+sapply(models_traits, function(m) length(unique(m$frame$SP)))   # nb d'especes
+# Exemple : résumé du modèle du SLA
+#summary(models_traits$SLA)
+
+# Fonction extrayant PC1 et PC2
+# ------------------------------
+extract_PC_results <- function(model, trait_name) {
+  coef_table <- summary(model)$coefficients$cond |>
+    as.data.frame() |>
+    rownames_to_column("Predictor")
+  coef_table |>
+    filter(Predictor %in% c("PC1", "PC2")) |>
+    transmute(
+      Trait = trait_name,
+      Predictor,
+      Estimate = Estimate,
+      SE = `Std. Error`,
+      z_value = `z value`,
+      p_value = `Pr(>|z|)`,
+      CI_low = Estimate - 1.96 * SE,
+      CI_high = Estimate + 1.96 * SE,
+      Significance = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value < 0.05  ~ "*",
+        p_value < 0.10  ~ ".",
+        TRUE            ~ "ns"
+      )
+    )
+}
+
+# Tableau long des résultats
+# --------------------------
+RESULTS <- imap_dfr(
+  models_traits,
+  extract_PC_results
+)
+RESULTS
+p
+
+#-------------------------------------------------------------
+# GLMM AUTOMATIQUES POUR TOUS LES TRAITS
+# Effets de chaque variable édaphique
+#-------------------------------------------------------------
+library(dplyr)
+library(ggplot2)
+
+## Création d'un nouvel objet "RESULTS2" reprenant les coefficients des
+## effet de chaque variable édaphique sur chaque trait
+#----------------------------------------------------------------------
+RESULTS2 = as.data.frame(matrix(ncol=ncol(SOIL3),nrow=ncol(TRAITS3)))
+colnames(RESULTS2) = colnames(SOIL3)
+rownames(RESULTS2) = colnames(TRAITS3)
+head(RESULTS2) ; dim(RESULTS2)
+
+i=1;j=1
+for(i in 1:ncol(SOIL3)){  ## pour chaque variable édaphique...
+  title.x = colnames(SOIL3)[i]
+  X = SOIL3[,i]
+  for(j in 1:ncol(TRAITS3)){  ## pour chaque trait...
+    title.y = colnames(TRAITS3)[j]
+    Y = TRAITS3[,j]
+    MAT = as.data.frame(cbind(Y,X,SCORES$CIRC,SCORES$SP,SCORES$IND))
+    colnames(MAT) = c(title.y,title.x,"CIRC","SP","IND")
+    MAT[,1] = as.numeric(MAT[,1])
+    MAT[,2] = as.numeric(MAT[,2])
+    MAT[,3] = as.numeric(MAT[,3])
+    MAT[,4] = as.factor(MAT[,4])
+    MAT[,5] = as.factor(MAT[,5])
+    GLMM = glmmTMB(
+      #Y ~ X + CIRC + (1 | SP/IND),
+      Y ~ X + CIRC + (1 | SP),
+      data = MAT,
+      family = gaussian())
+    SUMMARY = summary(GLMM)
+    RESULTS2[j,i] = round(SUMMARY$coefficients$cond[2,1],3)
+    sign=""
+    if(SUMMARY$coefficients$cond[2,4]<=0.1) {sign="."}
+    if(SUMMARY$coefficients$cond[2,4]<=0.05) {sign="*"}
+    if(SUMMARY$coefficients$cond[2,4]<=0.01) {sign="**"}
+    if(SUMMARY$coefficients$cond[2,4]<=0.001){sign="***"}
+    RESULTS2[j,i] = paste0(RESULTS2[j,i],sign)
+  }
+}
+
+RESULTS2
+
+
+#----------------------------------------------------------------
+##                        HEATMAPS                             ##
+## Création d'un nouvel objet "SCORES2" reprenant les variables
+## explicatives choisies pour faire des modèles GLMM INTERACTIFS
+#----------------------------------------------------------------
+#w = which(colnames(SCORES)%in%c("R_Mg","pH","Mn","IND","SP","CIRC"))
+#SCORES2 = SCORES[,w] ; head(SCORES2)
+#colnames(SCORES2) = c("IND","SP","CIRC","Y","X1","X2")
+#head(SCORES2)
+
+# Modèle avec interaction
+# ------------------------------------------------------------
+MOD <- glmmTMB(
+  Y ~ X1 * X2 + CIRC + (1 | SP/IND),
+  data = SCORES2,
+  family = gaussian()
+)
+summary(MOD)
+
+# Comparer au modèle additif
+# ------------------------------------------------------------
+#mod_RTD_add <- glmmTMB(
+#  R_TD ~ PC1 + PC2 + CIRC + (1 | SP),
+#  data = SCORES,
+#  family = gaussian()
+#)
+#AIC(mod_RTD_add, mod_RTD_inter)
+#anova(mod_RTD_add, mod_RTD_inter)
+
+# Grille de prédiction
+# ------------------------------------------------------------
+pred_grid <- expand.grid(
+  X1 = seq(
+    min(SCORES2$X1, na.rm = TRUE),
+    max(SCORES2$X1, na.rm = TRUE),
+    length.out = 200
+  ),
+  X2 = seq(
+    min(SCORES2$X2, na.rm = TRUE),
+    max(SCORES2$X2, na.rm = TRUE),
+    length.out = 200
+  ),
+  CIRC = mean(SCORES2$CIRC, na.rm = TRUE),
+  
+  # Nécessaire pour que predict() trouve la variable GEN.
+  # Elle n'influence pas les prédictions car re.form = NA.
+  #GEN = levels(factor(SCORES$GEN))[1]
+  SPE = levels(factor(SCORES$SP))[1]
+)
+
+# Prédictions populationnelles
+# ----------------------------
+pred_grid$TRAIT <- predict(
+  MOD,
+  newdata = pred_grid,
+  type = "response",
+  re.form = NA,
+  allow.new.levels = TRUE
+)
+
+# Heatmap
+# --------
+HEATMAP <- ggplot(
+  pred_grid,
+  #pred_grid_hull,
+  aes(
+    x = X1,
+    y = X2,
+    fill = TRAIT
+  )
+) +
+  
+  geom_raster(
+    interpolate = TRUE
+  ) +
+  
+  geom_contour(
+    aes(z = TRAIT),
+    colour = "white",
+    linewidth = 0.45,
+    alpha = 0.75
+  ) +
+  
+  # Montrer l'espace réellement échantillonné
+  geom_point(
+    data = SCORES2,
+    aes(
+      x = X1,
+      y = X2
+    ),
+    inherit.aes = FALSE,
+    shape = 21,
+    fill = "white",
+    colour = "black",
+    size = 2.1,
+    stroke = 0.45,
+    alpha = 0.75
+  ) +
+  
+  scale_fill_viridis_c(
+    option = "magma",
+    name = "Predicted\nR_TD"
+  ) +
+  
+  labs(
+    x = "Soil PC1",
+    y = "Soil PC2",
+    title = "Predicted root tissue density",
+    subtitle = "Interactive effect of soil PC1 and PC2"
+  ) +
+  
+  coord_equal(
+    expand = FALSE
+  ) +
+  
+  theme_classic(base_size = 15) +
+  
+  theme(
+    axis.title = element_text(
+      size = 17,
+      face = "bold"
+    ),
+    axis.text = element_text(
+      size = 13,
+      colour = "black"
+    ),
+    plot.title = element_text(
+      size = 19,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 13
+    ),
+    legend.title = element_text(
+      size = 13,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 12
+    )
+  )
+HEATMAP
+
+p
+round(cor(SOIL3,scores),2)
+
